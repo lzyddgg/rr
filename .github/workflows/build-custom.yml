@@ -14,46 +14,67 @@ on:
       version:
         description: "DSM version"
         required: true
-        default: "7.2"
+        default: "6.2"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 120
 
-      - name: Install deps
+    steps:
+      - name: Checkout current repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install dependencies
         run: |
+          set -euxo pipefail
           sudo apt update
-          sudo apt install -y locales busybox dialog curl xz-utils cpio sed unzip
-          sudo locale-gen en_US.UTF-8 zh_CN.UTF-8
-          if ! command -v yq >/dev/null 2>&1 || ! yq --version | grep -q "v4."; then
-            sudo curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/bin/yq
-            sudo chmod +x /usr/bin/yq
+          sudo apt install -y locales busybox dialog curl xz-utils cpio sed unzip dos2unix
+          sudo locale-gen de_DE.UTF-8 en_US.UTF-8 es_ES.UTF-8 fr_FR.UTF-8 ja_JP.UTF-8 ko_KR.UTF-8 ru_RU.UTF-8 uk_UA.UTF-8 vi_VN.UTF-8 zh_CN.UTF-8 zh_HK.UTF-8 zh_TW.UTF-8
+
+          if ! command -v yq >/dev/null 2>&1 || ! yq --version 2>/dev/null | grep -q "v4."; then
+            sudo curl -kL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/bin/yq
+            sudo chmod a+x /usr/bin/yq
           fi
 
-      - name: Download base image
+      - name: Download base image from RR release
         run: |
+          set -euxo pipefail
           TAG="${{ inputs.base_tag }}"
-          curl -L "https://github.com/RROrg/rr/releases/download/${TAG}/rr-${TAG}.img.zip" -o rr.zip
-          unzip rr.zip -d rr
+          curl -kL --connect-timeout 20 "https://github.com/RROrg/rr/releases/download/${TAG}/rr-${TAG}.img.zip" -o rr-base.zip
+          unzip rr-base.zip -d rr
+          test -f rr/rr.img
 
-      - name: Build with current source
+      - name: Build with current source changes
         run: |
+          set -euxo pipefail
           export TERM=xterm
-          sudo ./localbuild.sh create rr/ws rr/rr.img
 
-          # 关键：把你当前仓库修改覆盖进工作区
-          sudo cp -rf files/initrd/opt/rr/* rr/ws/initrd/opt/rr/
+          echo "workspace: $GITHUB_WORKSPACE"
+          ls -la "$GITHUB_WORKSPACE"
+          test -f "$GITHUB_WORKSPACE/localbuild.sh"
 
-          sudo ./localbuild.sh init
-          sudo ./localbuild.sh config "${{ inputs.model }}" "${{ inputs.version }}"
-          sudo ./localbuild.sh build
-          sudo ./localbuild.sh pack rr/rr.img
+          sudo bash "$GITHUB_WORKSPACE/localbuild.sh" create "$GITHUB_WORKSPACE/rr/ws" "$GITHUB_WORKSPACE/rr/rr.img"
 
+          # Overlay current repo changes into unpacked workspace initrd
+          sudo cp -rf "$GITHUB_WORKSPACE/files/initrd/opt/rr/"* "$GITHUB_WORKSPACE/rr/ws/initrd/opt/rr/"
+
+          sudo bash "$GITHUB_WORKSPACE/localbuild.sh" init
+          sudo bash "$GITHUB_WORKSPACE/localbuild.sh" config "${{ inputs.model }}" "${{ inputs.version }}"
+          sudo bash "$GITHUB_WORKSPACE/localbuild.sh" build
+          sudo bash "$GITHUB_WORKSPACE/localbuild.sh" pack "$GITHUB_WORKSPACE/rr/rr.img"
+
+          cd "$GITHUB_WORKSPACE"
           zip -9 "rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip" -j rr/rr.img
+          sha256sum "rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip" > "rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: rr-custom-image
-          path: rr-*-custom.img.zip
+          name: rr-custom-${{ inputs.model }}-${{ inputs.base_tag }}
+          path: |
+            rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip
+            rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip.sha256
+          retention-days: 7
