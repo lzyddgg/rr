@@ -1,4 +1,4 @@
-name: Build Custom RR Image
+name: Build Custom RR Image (Patch Initrd)
 
 on:
   workflow_dispatch:
@@ -8,13 +8,9 @@ on:
         required: true
         default: "24.4.4"
       model:
-        description: "DSM model"
+        description: "Model label for output name"
         required: true
         default: "DS418play"
-      version:
-        description: "DSM version"
-        required: true
-        default: "6.2"
 
 jobs:
   build:
@@ -31,44 +27,60 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt update
-          sudo apt install -y locales busybox dialog curl xz-utils cpio sed unzip dos2unix
-          sudo locale-gen de_DE.UTF-8 en_US.UTF-8 es_ES.UTF-8 fr_FR.UTF-8 ja_JP.UTF-8 ko_KR.UTF-8 ru_RU.UTF-8 uk_UA.UTF-8 vi_VN.UTF-8 zh_CN.UTF-8 zh_HK.UTF-8 zh_TW.UTF-8
+          sudo apt install -y curl unzip xz-utils cpio dosfstools util-linux zip
 
-          if ! command -v yq >/dev/null 2>&1 || ! yq --version 2>/dev/null | grep -q "v4."; then
-            sudo curl -kL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/bin/yq
-            sudo chmod a+x /usr/bin/yq
-          fi
-
-      - name: Download base image from RR release
+      - name: Download base RR image
         run: |
           set -euxo pipefail
           TAG="${{ inputs.base_tag }}"
-          curl -kL --connect-timeout 20 "https://github.com/RROrg/rr/releases/download/${TAG}/rr-${TAG}.img.zip" -o rr-base.zip
+          curl -kL --connect-timeout 20 \
+            "https://github.com/RROrg/rr/releases/download/${TAG}/rr-${TAG}.img.zip" \
+            -o rr-base.zip
           unzip rr-base.zip -d rr
           test -f rr/rr.img
 
-      - name: Build with current source changes
+      - name: Patch initrd with current source
         run: |
           set -euxo pipefail
-          export TERM=xterm
+          WORK="$GITHUB_WORKSPACE"
+          IMG="$WORK/rr/rr.img"
 
-          echo "workspace: $GITHUB_WORKSPACE"
-          ls -la "$GITHUB_WORKSPACE"
-          test -f "$GITHUB_WORKSPACE/localbuild.sh"
+          LOOP="$(sudo losetup -f --show -P "$IMG")"
+          echo "LOOP=$LOOP"
 
-          sudo bash "$GITHUB_WORKSPACE/localbuild.sh" create "$GITHUB_WORKSPACE/rr/ws" "$GITHUB_WORKSPACE/rr/rr.img"
+          mkdir -p /tmp/rr_p3
+          sudo mount "${LOOP}p3" /tmp/rr_p3
 
-          # Overlay current repo changes into unpacked workspace initrd
-          sudo cp -rf "$GITHUB_WORKSPACE/files/initrd/opt/rr/"* "$GITHUB_WORKSPACE/rr/ws/initrd/opt/rr/"
+          test -f /tmp/rr_p3/initrd-rr
 
-          sudo bash "$GITHUB_WORKSPACE/localbuild.sh" init
-          sudo bash "$GITHUB_WORKSPACE/localbuild.sh" config "${{ inputs.model }}" "${{ inputs.version }}"
-          sudo bash "$GITHUB_WORKSPACE/localbuild.sh" build
-          sudo bash "$GITHUB_WORKSPACE/localbuild.sh" pack "$GITHUB_WORKSPACE/rr/rr.img"
+          rm -rf "$WORK/initrd_unpack"
+          mkdir -p "$WORK/initrd_unpack"
+          (
+            cd "$WORK/initrd_unpack"
+            sudo xz -dc </tmp/rr_p3/initrd-rr | sudo cpio -idm
+          )
 
-          cd "$GITHUB_WORKSPACE"
-          zip -9 "rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip" -j rr/rr.img
-          sha256sum "rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip" > "rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip.sha256"
+          # 覆盖你仓库里的 rr 脚本与模型配置
+          sudo cp -rf "$WORK/files/initrd/opt/rr/"* "$WORK/initrd_unpack/opt/rr/"
+
+          # 重新打包 initrd
+          (
+            cd "$WORK/initrd_unpack"
+            sudo find . 2>/dev/null | sudo cpio -o -H newc -R root:root | xz --check=crc32 > "$WORK/initrd-rr.new"
+          )
+
+          sudo cp -f "$WORK/initrd-rr.new" /tmp/rr_p3/initrd-rr
+          sync
+
+          sudo umount /tmp/rr_p3
+          sudo losetup -d "$LOOP"
+
+      - name: Package output
+        run: |
+          set -euxo pipefail
+          OUT="rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip"
+          zip -9 "$OUT" -j rr/rr.img
+          sha256sum "$OUT" > "${OUT}.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
