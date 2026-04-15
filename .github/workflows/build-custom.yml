@@ -1,0 +1,59 @@
+name: Build Custom RR Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_tag:
+        description: "Base RR release tag"
+        required: true
+        default: "24.4.4"
+      model:
+        description: "DSM model"
+        required: true
+        default: "DS418play"
+      version:
+        description: "DSM version"
+        required: true
+        default: "7.2"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt update
+          sudo apt install -y locales busybox dialog curl xz-utils cpio sed unzip
+          sudo locale-gen en_US.UTF-8 zh_CN.UTF-8
+          if ! command -v yq >/dev/null 2>&1 || ! yq --version | grep -q "v4."; then
+            sudo curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/bin/yq
+            sudo chmod +x /usr/bin/yq
+          fi
+
+      - name: Download base image
+        run: |
+          TAG="${{ inputs.base_tag }}"
+          curl -L "https://github.com/RROrg/rr/releases/download/${TAG}/rr-${TAG}.img.zip" -o rr.zip
+          unzip rr.zip -d rr
+
+      - name: Build with current source
+        run: |
+          export TERM=xterm
+          sudo ./localbuild.sh create rr/ws rr/rr.img
+
+          # 关键：把你当前仓库修改覆盖进工作区
+          sudo cp -rf files/initrd/opt/rr/* rr/ws/initrd/opt/rr/
+
+          sudo ./localbuild.sh init
+          sudo ./localbuild.sh config "${{ inputs.model }}" "${{ inputs.version }}"
+          sudo ./localbuild.sh build
+          sudo ./localbuild.sh pack rr/rr.img
+
+          zip -9 "rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip" -j rr/rr.img
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rr-custom-image
+          path: rr-*-custom.img.zip
