@@ -1,4 +1,4 @@
-name: Build Custom RR Image (Patch Initrd)
+name: Build Custom RR Image + Verify + VMDK
 
 on:
   workflow_dispatch:
@@ -11,6 +11,10 @@ on:
         description: "Model label for output name"
         required: true
         default: "DS418play"
+      version:
+        description: "DSM version"
+        required: true
+        default: "6.2"
 
 jobs:
   build:
@@ -27,7 +31,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt update
-          sudo apt install -y curl unzip xz-utils cpio dosfstools util-linux zip
+          sudo apt install -y curl unzip xz-utils cpio dosfstools util-linux zip qemu-utils e2fsprogs jq
 
       - name: Download base RR image
         run: |
@@ -60,10 +64,8 @@ jobs:
             sudo xz -dc </tmp/rr_p3/initrd-rr | sudo cpio -idm
           )
 
-          # 覆盖你仓库里的 rr 脚本与模型配置
           sudo cp -rf "$WORK/files/initrd/opt/rr/"* "$WORK/initrd_unpack/opt/rr/"
 
-          # 重新打包 initrd
           (
             cd "$WORK/initrd_unpack"
             sudo find . 2>/dev/null | sudo cpio -o -H newc -R root:root | xz --check=crc32 > "$WORK/initrd-rr.new"
@@ -75,18 +77,80 @@ jobs:
           sudo umount /tmp/rr_p3
           sudo losetup -d "$LOOP"
 
-      - name: Package output
+      - name: Verify image integrity and patch result
         run: |
           set -euxo pipefail
-          OUT="rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip"
-          zip -9 "$OUT" -j rr/rr.img
-          sha256sum "$OUT" > "${OUT}.sha256"
+          WORK="$GITHUB_WORKSPACE"
+          IMG="$WORK/rr/rr.img"
 
-      - name: Upload artifact
+          sudo fdisk -l "$IMG"
+
+          LOOP="$(sudo losetup -f --show -P "$IMG")"
+          echo "VERIFY_LOOP=$LOOP"
+
+          mkdir -p /tmp/rr_p1 /tmp/rr_p3
+          sudo mount "${LOOP}p1" /tmp/rr_p1
+          sudo mount "${LOOP}p3" /tmp/rr_p3
+
+          # 基本完整性检查
+          test -f /tmp/rr_p1/boot/grub/grub.cfg
+          test -f /tmp/rr_p1/RR_VERSION
+          test -f /tmp/rr_p3/bzImage-rr
+          test -f /tmp/rr_p3/initrd-rr
+
+          # initrd 可读性检查
+          xz -t /tmp/rr_p3/initrd-rr
+
+          rm -rf "$WORK/initrd_verify"
+          mkdir -p "$WORK/initrd_verify"
+          (
+            cd "$WORK/initrd_verify"
+            sudo xz -dc </tmp/rr_p3/initrd-rr | sudo cpio -idm
+          )
+
+          # 关键改动检查：必须包含 DS418play
+          test -f "$WORK/initrd_verify/opt/rr/model-configs/DS418play.yml"
+          grep -q '"DS418play"' "$WORK/initrd_verify/opt/rr/docs/models.json"
+
+          sudo umount /tmp/rr_p1
+          sudo umount /tmp/rr_p3
+
+          # 文件系统只读检查（不修改）
+          sudo e2fsck -fn "${LOOP}p3" || true
+          sudo fsck.vfat -n "${LOOP}p1" || true
+
+          sudo losetup -d "$LOOP"
+
+      - name: Build VMDK
+        run: |
+          set -euxo pipefail
+          qemu-img convert -f raw -O vmdk \
+            -o adapter_type=lsilogic,subformat=monolithicSparse \
+            rr/rr.img rr/rr.vmdk
+          qemu-img info rr/rr.vmdk
+
+      - name: Package outputs
+        run: |
+          set -euxo pipefail
+          BASE="${{ inputs.base_tag }}"
+          MODEL="${{ inputs.model }}"
+
+          IMG_ZIP="rr-${MODEL}-${BASE}-custom.img.zip"
+          VMDK_ZIP="rr-${MODEL}-${BASE}-custom.vmdk.zip"
+
+          zip -9 "$IMG_ZIP" -j rr/rr.img
+          zip -9 "$VMDK_ZIP" -j rr/rr.vmdk
+
+          sha256sum "$IMG_ZIP"  > "${IMG_ZIP}.sha256"
+          sha256sum "$VMDK_ZIP" > "${VMDK_ZIP}.sha256"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: rr-custom-${{ inputs.model }}-${{ inputs.base_tag }}
           path: |
             rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip
             rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.img.zip.sha256
+            rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.vmdk.zip
+            rr-${{ inputs.model }}-${{ inputs.base_tag }}-custom.vmdk.zip.sha256
           retention-days: 7
