@@ -48,32 +48,43 @@ jobs:
           set -euxo pipefail
           WORK="$GITHUB_WORKSPACE"
           IMG="$WORK/rr/rr.img"
-
+      
+          # 先确认源码里确实有这个文件（避免误判）
+          test -f "$WORK/files/initrd/opt/rr/model-configs/DS418play.yml"
+          grep -q '"DS418play"' "$WORK/docs/models.json"
+      
           LOOP="$(sudo losetup -f --show -P "$IMG")"
-          echo "LOOP=$LOOP"
-
           mkdir -p /tmp/rr_p3
           sudo mount "${LOOP}p3" /tmp/rr_p3
-
-          test -f /tmp/rr_p3/initrd-rr
-
+      
           rm -rf "$WORK/initrd_unpack"
           mkdir -p "$WORK/initrd_unpack"
           (
             cd "$WORK/initrd_unpack"
             sudo xz -dc </tmp/rr_p3/initrd-rr | sudo cpio -idm
           )
-
-          sudo cp -rf "$WORK/files/initrd/opt/rr/"* "$WORK/initrd_unpack/opt/rr/"
-
+      
+          # 显式覆盖关键文件（最稳）
+          sudo mkdir -p "$WORK/initrd_unpack/opt/rr/model-configs"
+          sudo install -m 0644 \
+            "$WORK/files/initrd/opt/rr/model-configs/DS418play.yml" \
+            "$WORK/initrd_unpack/opt/rr/model-configs/DS418play.yml"
+      
+          sudo install -m 0644 \
+            "$WORK/docs/models.json" \
+            "$WORK/initrd_unpack/opt/rr/docs/models.json"
+      
+          # 打包前再确认一次
+          test -f "$WORK/initrd_unpack/opt/rr/model-configs/DS418play.yml"
+          grep -q '"DS418play"' "$WORK/initrd_unpack/opt/rr/docs/models.json"
+      
           (
             cd "$WORK/initrd_unpack"
             sudo find . 2>/dev/null | sudo cpio -o -H newc -R root:root | xz --check=crc32 > "$WORK/initrd-rr.new"
           )
-
+      
           sudo cp -f "$WORK/initrd-rr.new" /tmp/rr_p3/initrd-rr
           sync
-
           sudo umount /tmp/rr_p3
           sudo losetup -d "$LOOP"
 
